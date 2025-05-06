@@ -5,6 +5,7 @@
 #include <omp.h>
 #include <metis.h>
 #include <string>
+#include <set>
 
 #define ROOT 0
 
@@ -12,6 +13,14 @@
 struct Edge {
     int dest;
     int weight;
+};
+
+// Structure to represent edge modification (insertion or deletion)
+struct EdgeModification {
+    int src;
+    int dest;
+    int weight; // Only used for insertions
+    bool is_insertion; // true for insertion, false for deletion
 };
 
 // Structure to represent a graph
@@ -124,8 +133,183 @@ void partitionGraph(const Graph& graph, int nparts, std::vector<int>& part) {
     delete[] vwgt;
 }
 
-// Parallel SOSP algorithm
-void parallelSOSP(const Graph& graph, int source, std::vector<int>& dist,
+// Update SOSP tree for edge deletions
+void updateSOSPDeletion(Graph& graph, std::vector<int>& dist, std::vector<int>& parent,
+                       const std::vector<EdgeModification>& deletions, const std::vector<int>& part,
+                       int rank, int size) {
+    int n = graph.V;
+    std::vector<std::vector<EdgeModification>> grouped_deletions(n); // Group by destination vertex
+    std::vector<int> marked(n, 0); // Track affected vertices
+    std::vector<int> affected;
+
+    // Step 0: Preprocessing - Group deletions by destination vertex
+    for (const auto& del : deletions) {
+        if (!del.is_insertion) {
+            grouped_deletions[del.dest].push_back(del);
+        }
+    }
+
+    // Step 1: Process deleted edges and update graph
+    #pragma omp parallel
+    {
+        std::vector<int> thread_affected;
+        #pragma omp for nowait
+        for (int v = 0; v < n; v++) {
+            if (!part[v] == rank) continue; // Process only local vertices
+            for (const auto& del : grouped_deletions[v]) {
+                int u = del.src;
+                // Remove edge (u, v) from graph
+                auto& adj_list = graph.adj[u];
+                for (auto it = adj_list.begin(); it != adj_list.end(); ++it) {
+                    if (it->dest == v) {
+                        adj_list.erase(it);
+                        break;
+                    }
+                }
+                // Check if vertex v's current shortest path used edge (u, v)
+                if (parent[v] == u && dist[v] != std::numeric_limits<int>::max()) {
+                    dist[v] = std::numeric_limits<int>::max();
+                    parent[v] = -1;
+                    thread_affected.push_back(v);
+                    marked[v] = 1;
+                }
+            }
+        }
+        #pragma omp critical
+        {
+            affected.insert(affected.end(), thread_affected.begin(), thread_affected.end());
+        }
+    }
+
+    // Step 2: Propagate updates
+    bool global_changed = true;
+    int iteration = 0;
+    while (global_changed) {
+        global_changed = false;
+        iteration++;
+        std::vector<int> next_affected;
+        std::vector<int> neighbors;
+
+        // Gather unique neighbors of affected vertices
+        #pragma omp parallel
+        {
+            std::vector<int> thread_neighbors;
+            #pragma omp for nowait
+            for (size_t i = 0; i < affected.size(); i++) {
+                int u = affected[i];
+                if (!part[u] == rank) continue;
+                for (const auto& edge : graph.adj[u]) {
+                    thread_neighbors.push_back(edge.dest);
+                }
+            }
+            #pragma omp critical
+            {
+                neighbors.insert(neighbors.end(), thread_neighbors.begin(), thread_neighbors.end());
+            }
+        }
+
+        // Remove duplicates
+        std::set<int> unique_neighbors(neighbors.begin(), neighbors.end());
+        neighbors.assign(unique_neighbors.begin(), unique_neighbors.end());
+
+        // Update distances for neighbors
+        #pragma omp parallel
+        {
+            std::vector<int> thread_affected;
+            std::vector<std::tuple<int, int, int>> thread_updates; // (vertex, new_dist, parent)
+            #pragma omp for nowait
+            for (size_t i = 0; i < neighbors.size(); i++) {
+                int v = neighbors[i];
+                if (!part[v] == rank) continue;
+                // Find alternative paths to v
+                for (int u = 0; u < n; u++) {
+                    for (const auto& edge : graph.adj[u]) {
+                        if (edge.dest == v) {
+                            int new_dist = (dist[u] == std::numeric_limits<int>::max()) ?
+                                          std::numeric_limits<int>::max() : dist[u] + edge.weight;
+                            if (new_dist < dist[v]) {
+                                thread_updates.emplace_back(v, new_dist, u);
+                                if (marked[v] == 0) {
+                                    thread_affected.push_back(v);
+                                    marked[v] = 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            #pragma omp critical
+            {
+                for (const auto& [v, new_dist, u] : thread_updates) {
+                    if (new_dist < dist[v]) {
+                        dist[v] = new_dist;
+                        parent[v] = u;
+                    }
+                }
+                next_affected.insert(next_affected.end(), thread_affected.begin(), thread_affected.end());
+            }
+        }
+
+        affected = next_affected;
+        global_changed = !affected.empty();
+
+        // Synchronize distances and parents
+        std::vector<int> global_dist = dist;
+        MPI_Allreduce(MPI_IN_PLACE, global_dist.data(), n, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
+        std::vector<int> global_parent(n, -1);
+        for (int i = 0; i < n; i++) {
+            if (dist[i] != std::numeric_limits<int>::max() && parent[i] != -1) {
+                global_parent[i] = parent[i];
+            }
+        }
+        MPI_Allreduce(MPI_IN_PLACE, global_parent.data(), n, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
+
+        // Update local copies
+        for (int i = 0; i < n; i++) {
+            if (global_dist[i] < dist[i]) {
+                dist[i] = global_dist[i];
+                parent[i] = global_parent[i];
+                if (part[i] == rank && marked[i] == 0) {
+                    affected.push_back(i);
+                    marked[i] = 1;
+                    global_changed = true;
+                }
+            } else if (dist[i] == global_dist[i] && parent[i] != global_parent[i]) {
+                parent[i] = global_parent[i];
+            }
+        }
+
+        // Synchronize global_changed
+        bool temp_changed = global_changed;
+        MPI_Allreduce(&temp_changed, &global_changed, 1, MPI_C_BOOL, MPI_LOR, MPI_COMM_WORLD);
+
+        if (rank == ROOT) {
+            std::cout << "Deletion update iteration " << iteration << ", affected vertices: "
+                      << affected.size() << ", changes: " << (global_changed ? "yes" : "no") << std::endl;
+        }
+
+        if (iteration > 100) {
+            if (rank == ROOT) {
+                std::cout << "Deletion update reached iteration limit" << std::endl;
+            }
+            break;
+        }
+    }
+
+    // Final synchronization
+    MPI_Allreduce(MPI_IN_PLACE, dist.data(), n, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
+    std::vector<int> global_parent(n, -1);
+    for (int i = 0; i < n; i++) {
+        if (dist[i] != std::numeric_limits<int>::max() && parent[i] != -1) {
+            global_parent[i] = parent[i];
+        }
+    }
+    MPI_Allreduce(MPI_IN_PLACE, global_parent.data(), n, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
+    parent = global_parent;
+}
+
+// Parallel SOSP algorithm (modified to handle initial computation)
+void parallelSOSP(Graph& graph, int source, std::vector<int>& dist,
                  std::vector<int>& parent, const std::vector<int>& part,
                  int rank, int size) {
     int n = graph.V;
@@ -193,7 +377,7 @@ void parallelSOSP(const Graph& graph, int source, std::vector<int>& dist,
                 for (const auto& [v, new_dist, u] : thread_updates) {
                     if (new_dist < dist[v]) {
                         dist[v] = new_dist;
-                        parent[v] = u; // Correctly assign the parent
+                        parent[v] = u;
                         local_changed = true;
                         next_active.push_back(v);
                     }
@@ -202,7 +386,7 @@ void parallelSOSP(const Graph& graph, int source, std::vector<int>& dist,
 
             #pragma omp critical
             {
-                thread_active.swap(next_active); // Merge thread_active into next_active
+                thread_active.swap(next_active);
             }
         }
 
@@ -347,25 +531,81 @@ int main(int argc, char* argv[]) {
         std::cout << "Finished graph partitioning" << std::endl;
     }
 
-    // Compute shortest paths
+    // Compute initial shortest paths
     std::vector<int> dist, parent;
     double start_time = MPI_Wtime();
 
     if (rank == ROOT) {
-        std::cout << "Starting SOSP computation..." << std::endl;
+        std::cout << "Starting initial SOSP computation..." << std::endl;
     }
 
     parallelSOSP(graph, source, dist, parent, part, rank, size);
     double end_time = MPI_Wtime();
 
     if (rank == ROOT) {
-        std::cout << "SOSP computation completed in " << (end_time - start_time) << " seconds" << std::endl;
+        std::cout << "Initial SOSP computation completed in " << (end_time - start_time) << " seconds" << std::endl;
+    }
+
+    // Define sample edge deletions
+    std::vector<EdgeModification> deletions;
+    if (rank == ROOT) {
+        deletions = {
+            {0, 1, 0, false}, // Delete edge (0,1)
+            {9, 14, 0, false}  // Delete edge (2,3)
+        };
+        std::cout << "Applying edge deletions..." << std::endl;
+    }
+
+    // Broadcast deletions
+    int num_deletions;
+    if (rank == ROOT) {
+        num_deletions = deletions.size();
+    }
+    MPI_Bcast(&num_deletions, 1, MPI_INT, ROOT, MPI_COMM_WORLD);
+
+    if (rank != ROOT) {
+        deletions.resize(num_deletions);
+    }
+
+    struct MPIData {
+        int src;
+        int dest;
+        int weight;
+        int is_insertion;
+    };
+
+    std::vector<MPIData> mpi_deletions(num_deletions);
+    if (rank == ROOT) {
+        for (size_t i = 0; i < deletions.size(); i++) {
+            mpi_deletions[i] = {deletions[i].src, deletions[i].dest, deletions[i].weight, deletions[i].is_insertion ? 1 : 0};
+        }
+    }
+
+    MPI_Bcast(mpi_deletions.data(), num_deletions * sizeof(MPIData) / sizeof(int), MPI_INT, ROOT, MPI_COMM_WORLD);
+
+    if (rank != ROOT) {
+        for (int i = 0; i < num_deletions; i++) {
+            deletions[i] = {mpi_deletions[i].src, mpi_deletions[i].dest, mpi_deletions[i].weight, mpi_deletions[i].is_insertion == 1};
+        }
+    }
+
+    // Update SOSP for deletions
+    start_time = MPI_Wtime();
+    if (rank == ROOT) {
+        std::cout << "Starting SOSP update for edge deletions..." << std::endl;
+    }
+
+    updateSOSPDeletion(graph, dist, parent, deletions, part, rank, size);
+    end_time = MPI_Wtime();
+
+    if (rank == ROOT) {
+        std::cout << "SOSP update for deletions completed in " << (end_time - start_time) << " seconds" << std::endl;
     }
 
     // Print results on root
     if (rank == ROOT) {
-        std::cout << "\nFinal results:" << std::endl;
-        std::cout << "Total execution time: " << (end_time - start_time) << " seconds" << std::endl;
+        std::cout << "\nFinal results after edge deletions:" << std::endl;
+        std::cout << "Total execution time for update: " << (end_time - start_time) << " seconds" << std::endl;
 
         int sample_count = std::min(20, V);
         std::cout << "\nShortest paths (first " << sample_count << " vertices):" << std::endl;
@@ -391,7 +631,7 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        int reachable =  0;
+        int reachable = 0;
         for (int d : dist) {
             if (d != std::numeric_limits<int>::max()) {
                 reachable++;
