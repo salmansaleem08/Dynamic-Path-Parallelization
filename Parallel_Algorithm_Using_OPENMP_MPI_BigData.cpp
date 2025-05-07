@@ -15,38 +15,35 @@
 
 #define ROOT 0
 
-// Structure to represent a graph edge
+
 struct Edge {
     int dest;
-    std::vector<int> weights; // Weight vector for multiple objectives
+    std::vector<int> weights;
 };
 
-// Structure to represent edge modification (insertion or deletion)
 struct EdgeModification {
     int src;
     int dest;
-    std::vector<int> weights; // Weight vector for insertions
-    bool is_insertion; // true for insertion, false for deletion
+    std::vector<int> weights;
+    bool is_insertion;
 };
 
-// Structure to represent a graph
 struct Graph {
-    int V; // Number of vertices
-    std::vector<std::vector<Edge>> adj; // Adjacency list
+    int V;
+    std::vector<std::vector<Edge>> adj;
 };
 
-// Structure to represent an SOSP tree
 struct SOSPTree {
-    std::vector<std::pair<int, int>> edges; // Edges in the tree (u, v)
-    std::vector<int> dist; // Distances from source
-    std::vector<int> parent; // Parent array
+    std::vector<std::pair<int, int>> edges;
+    std::vector<int> dist;
+    std::vector<int> parent;
 };
 
-// Read graph from weighted_graph_usa.txt
+
 Graph readGraphFromFile(int num_objectives, int rank) {
     Graph graph;
     std::vector<std::tuple<int, int, std::vector<int>>> edges;
-    std::map<long long, int> vertex_map; // Map original IDs to indices
+    std::map<long long, int> vertex_map;
     int vertex_index = 0;
     int min_weight = std::numeric_limits<int>::max();
     int max_weight = std::numeric_limits<int>::min();
@@ -62,23 +59,20 @@ Graph readGraphFromFile(int num_objectives, int rank) {
         while (std::getline(file, line)) {
             std::istringstream iss(line);
             long long src, dest;
-            int weight1, weight2 = 0; // Default second weight to 0 if not provided
+            int weight1, weight2 = 0;
             if (!(iss >> src >> dest >> weight1)) {
                 std::cerr << "Warning: Skipping malformed line: " << line << std::endl;
                 continue;
             }
-            // Read second weight if available (for num_objectives >= 2)
             if (num_objectives >= 2) {
                 if (!(iss >> weight2)) {
-                    weight2 = weight1; // Use first weight if second is missing
+                    weight2 = weight1;
                 }
             }
 
-            // Update min/max weights
             min_weight = std::min({min_weight, weight1, weight2});
             max_weight = std::max({max_weight, weight1, weight2});
 
-            // Map vertices to indices
             if (vertex_map.find(src) == vertex_map.end()) {
                 vertex_map[src] = vertex_index++;
             }
@@ -86,7 +80,6 @@ Graph readGraphFromFile(int num_objectives, int rank) {
                 vertex_map[dest] = vertex_index++;
             }
 
-            // Add edge
             std::vector<int> weights = {weight1, weight2};
             edges.emplace_back(vertex_map[src], vertex_map[dest], weights);
         }
@@ -95,10 +88,8 @@ Graph readGraphFromFile(int num_objectives, int rank) {
         graph.V = vertex_map.size();
         graph.adj.resize(graph.V);
 
-        // Ensure num_objectives is at least 1
         int effective_objectives = std::max(1, num_objectives);
 
-        // Populate adjacency list
         for (auto& [u, v, w] : edges) {
             Edge edge;
             edge.dest = v;
@@ -119,7 +110,7 @@ Graph readGraphFromFile(int num_objectives, int rank) {
     return graph;
 }
 
-// Partition the graph using METIS
+
 void partitionGraph(const Graph& graph, int nparts, std::vector<int>& part) {
     idx_t nvtxs = graph.V;
     idx_t ncon = 1;
@@ -199,7 +190,6 @@ void partitionGraph(const Graph& graph, int nparts, std::vector<int>& part) {
     delete[] vwgt;
 }
 
-// Parallel Dijkstra's algorithm for SOSP
 void parallelSOSP(Graph& graph, int source, int objective_idx, std::vector<int>& dist,
                   std::vector<int>& parent, const std::vector<int>& part, int rank, int size) {
     int n = graph.V;
@@ -330,7 +320,7 @@ void parallelSOSP(Graph& graph, int source, int objective_idx, std::vector<int>&
     parent = global_parent;
 }
 
-// Parallel Bellman-Ford algorithm for MOSP
+
 void parallelBellmanFord(Graph& graph, int source, int objective_idx, std::vector<int>& dist,
                          std::vector<int>& parent, const std::vector<int>& part, int rank, int size) {
     int n = graph.V;
@@ -440,7 +430,7 @@ void parallelBellmanFord(Graph& graph, int source, int objective_idx, std::vecto
     parent = global_parent;
 }
 
-// Update SOSP tree for edge insertions and deletions
+
 void updateSOSP(Graph& graph, int objective_idx, std::vector<int>& dist,
                 std::vector<int>& parent, const std::vector<EdgeModification>& modifications,
                 const std::vector<int>& part, int rank, int size) {
@@ -448,7 +438,6 @@ void updateSOSP(Graph& graph, int objective_idx, std::vector<int>& dist,
     std::vector<int> marked(n, 0);
     std::vector<int> affected;
 
-    // Step 1: Process deletions
     #pragma omp parallel
     {
         std::vector<int> thread_affected;
@@ -761,7 +750,7 @@ void updateSOSP(Graph& graph, int objective_idx, std::vector<int>& dist,
     parent = global_parent;
 }
 
-// Create combined graph for MOSP
+
 Graph createCombinedGraph(const std::vector<SOSPTree>& sosp_trees, int V, int k, int rank) {
     Graph combined_graph;
     combined_graph.V = V;
@@ -789,7 +778,7 @@ Graph createCombinedGraph(const std::vector<SOSPTree>& sosp_trees, int V, int k,
     return combined_graph;
 }
 
-// Assign original weights to MOSP tree
+
 void assignOriginalWeights(const Graph& original_graph, const std::vector<int>& mosp_parent,
                            std::vector<std::pair<int, int>>& mosp_edges,
                            std::vector<std::vector<int>>& mosp_weights, int rank) {
@@ -823,7 +812,7 @@ void assignOriginalWeights(const Graph& original_graph, const std::vector<int>& 
     }
 }
 
-// Verify MOSP Pareto optimality
+
 void verifyMOSP(const Graph& graph, const std::vector<int>& mosp_dist, const std::vector<int>& mosp_parent,
                 int source, int num_objectives, int rank) {
     if (rank != ROOT) return;
@@ -955,8 +944,15 @@ int main(int argc, char* argv[]) {
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
 
+    // Timing variables
+    double graph_load_time = 0.0;
+    double metis_time = 0.0;
+    double sosp_time = 0.0;
+    double mosp_time = 0.0;
+    double start_time, end_time;
+
     // Validate number of objectives
-    int num_objectives = 2; // Default to bi-objective
+    int num_objectives = 2;
     std::vector<int> sources = {0, 0};
     if (argc > 1) {
         try {
@@ -988,14 +984,16 @@ int main(int argc, char* argv[]) {
     }
 
     Graph graph;
-    std::vector<std::tuple<int, int, std::vector<int>>> raw_edges; // Store edges for modifications
-    int min_weight = 1, max_weight = 10; // Defaults if file read fails
+    std::vector<std::tuple<int, int, std::vector<int>>> raw_edges;
+    int min_weight = 1, max_weight = 10;
+
+    // Start graph loading time
+    start_time = MPI_Wtime();
 
     if (rank == ROOT) {
         std::cout << "Reading graph from weighted_graph_usa.txt..." << std::endl;
         graph = readGraphFromFile(num_objectives, rank);
 
-        // Collect raw edges for modification selection
         for (int u = 0; u < graph.V; ++u) {
             for (const auto& edge : graph.adj[u]) {
                 raw_edges.emplace_back(u, edge.dest, edge.weights);
@@ -1009,7 +1007,6 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // Broadcast graph data
     int V;
     if (rank == ROOT) {
         V = graph.V;
@@ -1062,9 +1059,15 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // Broadcast min/max weights for modifications
     MPI_Bcast(&min_weight, 1, MPI_INT, ROOT, MPI_COMM_WORLD);
     MPI_Bcast(&max_weight, 1, MPI_INT, ROOT, MPI_COMM_WORLD);
+
+    // End graph loading time
+    end_time = MPI_Wtime();
+    graph_load_time = end_time - start_time;
+
+    // Start METIS partitioning time
+    start_time = MPI_Wtime();
 
     std::vector<int> part(V);
     if (rank == ROOT) {
@@ -1073,8 +1076,14 @@ int main(int argc, char* argv[]) {
     }
     MPI_Bcast(part.data(), V, MPI_INT, ROOT, MPI_COMM_WORLD);
 
+    // End METIS partitioning time
+    end_time = MPI_Wtime();
+    metis_time = end_time - start_time;
+
+    // Start SOSP computation time
+    start_time = MPI_Wtime();
+
     std::vector<SOSPTree> sosp_trees(num_objectives);
-    double start_time = MPI_Wtime();
     for (int i = 0; i < num_objectives; ++i) {
         if (rank == ROOT) {
             std::cout << "Computing initial SOSP for objective " << i << " using Dijkstra's..." << std::endl;
@@ -1095,7 +1104,6 @@ int main(int argc, char* argv[]) {
     if (rank == ROOT) {
         std::cout << "Generating edge modifications (insertions and deletions)..." << std::endl;
 
-        // Select 2 edges for deletion
         if (raw_edges.size() < 2) {
             std::cerr << "Error: Not enough edges to select for deletion" << std::endl;
             MPI_Abort(MPI_COMM_WORLD, 1);
@@ -1106,7 +1114,6 @@ int main(int argc, char* argv[]) {
         std::uniform_int_distribution<> edge_dist(0, raw_edges.size() - 1);
         std::set<int> selected_indices;
 
-        // Pick 2 unique edges for deletion
         while (selected_indices.size() < 2) {
             selected_indices.insert(edge_dist(gen));
         }
@@ -1117,7 +1124,6 @@ int main(int argc, char* argv[]) {
             std::cout << "Selected for deletion: (" << u << "," << v << ")" << std::endl;
         }
 
-        // Generate 2 new edges for insertion
         std::uniform_int_distribution<> vertex_dist(0, graph.V - 1);
         std::uniform_int_distribution<> weight_dist(min_weight, max_weight);
         for (int i = 0; i < 2; ++i) {
@@ -1134,7 +1140,7 @@ int main(int argc, char* argv[]) {
                         break;
                     }
                 }
-            } while (exists); // Ensure edge doesn't already exist
+            } while (exists);
 
             std::vector<int> weights(num_objectives);
             for (int j = 0; j < num_objectives; ++j) {
@@ -1218,6 +1224,13 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    // End SOSP computation time
+    end_time = MPI_Wtime();
+    sosp_time = end_time - start_time;
+
+    // Start MOSP computation time
+    start_time = MPI_Wtime();
+
     Graph combined_graph;
     if (rank == ROOT) {
         combined_graph = createCombinedGraph(sosp_trees, graph.V, num_objectives, rank);
@@ -1265,7 +1278,6 @@ int main(int argc, char* argv[]) {
         std::cout << "Computing MOSP on combined graph using Bellman-Ford..." << std::endl;
     }
     parallelBellmanFord(combined_graph, sources[0], 0, mosp_dist, mosp_parent, part, rank, size);
-    double end_time = MPI_Wtime();
 
     std::vector<std::pair<int, int>> mosp_edges;
     std::vector<std::vector<int>> mosp_weights;
@@ -1274,12 +1286,23 @@ int main(int argc, char* argv[]) {
     }
 
     if (rank == ROOT) {
-        verifyMOSP(graph, mosp_dist, mosp_parent, sources[0], num_objectives, rank);
+        //verifyMOSP(graph, mosp_dist, mosp_parent, sources[0], num_objectives, rank);
     }
+
+    // End MOSP computation time
+    end_time = MPI_Wtime();
+    mosp_time = end_time - start_time;
 
     if (rank == ROOT) {
         std::cout << "\nMOSP Results (Bellman-Ford):" << std::endl;
-        std::cout << "Total execution time: " << (end_time - start_time) << " seconds" << std::endl;
+        // Print individual timing results
+        std::cout << "\n=== Execution Times ===" << std::endl;
+        std::cout << "Graph Loading Time: " << graph_load_time << " seconds" << std::endl;
+        std::cout << "METIS Partitioning Time: " << metis_time << " seconds" << std::endl;
+        std::cout << "SOSP Computation Time : " << sosp_time << " seconds" << std::endl;
+        std::cout << "MOSP Computation Time : " << mosp_time << " seconds" << std::endl;
+        std::cout << "Total Execution Time: " << (graph_load_time + metis_time + sosp_time + mosp_time) << " seconds" << std::endl;
+
         std::cout << "\nMOSP Tree Edges:" << std::endl;
         for (size_t i = 0; i < mosp_edges.size(); ++i) {
             auto [u, v] = mosp_edges[i];

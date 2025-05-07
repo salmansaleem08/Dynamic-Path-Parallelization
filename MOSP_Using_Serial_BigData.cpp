@@ -58,8 +58,11 @@ Graph readGraphFromFile(int num_objectives) {
         std::exit(1);
     }
 
-    std::string line;
+    std::string line; int maxit =0;
     while (std::getline(file, line)) {
+    
+    	//maxit++;
+    	//if(maxit>100000) break;
         std::istringstream iss(line);
         long long src, dest;
         int weight1, weight2 = 0; // Default second weight to 0 if not provided
@@ -707,6 +710,13 @@ void verifyMOSP(const Graph& graph, const std::vector<int>& mosp_dist, const std
 }
 
 int main(int argc, char* argv[]) {
+    // Timing variables
+    double graph_load_time = 0.0;
+    double metis_time = 0.0;
+    double sosp_time = 0.0;
+    double mosp_time = 0.0;
+    std::chrono::high_resolution_clock::time_point start_time, end_time;
+
     //MPI_Init(&argc, &argv);
     //int rank, size;
     //MPI_Comm_rank(MPI_COMM_WORLD, &rank);
@@ -739,6 +749,9 @@ int main(int argc, char* argv[]) {
     std::vector<std::tuple<int, int, std::vector<int>>> raw_edges; // Store edges for modifications
     int min_weight = 1, max_weight = 10; // Defaults if file read fails
 
+    // Start graph loading time
+    start_time = std::chrono::high_resolution_clock::now();
+
     std::cout << "Reading graph from weighted_graph_usa.txt..." << std::endl;
     graph = readGraphFromFile(num_objectives);
 
@@ -755,14 +768,27 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    // End graph loading time
+    end_time = std::chrono::high_resolution_clock::now();
+    graph_load_time = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time).count() / 1e6;
+
+    // Start METIS partitioning time
+    start_time = std::chrono::high_resolution_clock::now();
+
     // Partition graph (optional, set to 1 part for serial)
     std::vector<int> part(graph.V, 0); // All vertices in partition 0
     // Uncomment to use METIS with 1 part:
     // std::cout << "Partitioning graph..." << std::endl;
     // partitionGraph(graph, 1, part);
 
+    // End METIS partitioning time
+    end_time = std::chrono::high_resolution_clock::now();
+    metis_time = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time).count() / 1e6;
+
+    // Start SOSP computation time
+    start_time = std::chrono::high_resolution_clock::now();
+
     std::vector<SOSPTree> sosp_trees(num_objectives);
-    auto start_time = std::chrono::high_resolution_clock::now();
     for (int i = 0; i < num_objectives; ++i) {
         std::cout << "Computing initial SOSP for objective " << i << " using Dijkstra's..." << std::endl;
         parallelSOSP(graph, sources[i], i, sosp_trees[i].dist, sosp_trees[i].parent);
@@ -845,23 +871,39 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    // End SOSP computation time
+    end_time = std::chrono::high_resolution_clock::now();
+    sosp_time = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time).count() / 1e6;
+
+    // Start MOSP computation time
+    start_time = std::chrono::high_resolution_clock::now();
+
     Graph combined_graph;
     combined_graph = createCombinedGraph(sosp_trees, graph.V, num_objectives);
 
     std::vector<int> mosp_dist, mosp_parent;
     std::cout << "Computing MOSP on combined graph using Bellman-Ford..." << std::endl;
     parallelBellmanFord(combined_graph, sources[0], 0, mosp_dist, mosp_parent);
-    auto end_time = std::chrono::high_resolution_clock::now();
-    double duration = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time).count() / 1e6;
 
     std::vector<std::pair<int, int>> mosp_edges;
     std::vector<std::vector<int>> mosp_weights;
     assignOriginalWeights(graph, mosp_parent, mosp_edges, mosp_weights);
 
-    verifyMOSP(graph, mosp_dist, mosp_parent, sources[0], num_objectives);
+    //verifyMOSP(graph, mosp_dist, mosp_parent, sources[0], num_objectives);
+
+    // End MOSP computation time
+    end_time = std::chrono::high_resolution_clock::now();
+    mosp_time = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time).count() / 1e6;
 
     std::cout << "\nMOSP Results (Bellman-Ford):" << std::endl;
-    std::cout << "Total execution time: " << duration << " seconds" << std::endl;
+    // Print individual timing results
+    std::cout << "\n=== Execution Times ===" << std::endl;
+    std::cout << "Graph Loading Time: " << graph_load_time << " seconds" << std::endl;
+    std::cout << "METIS Partitioning Time: " << metis_time << " seconds" << std::endl;
+    std::cout << "SOSP Computation Time : " << sosp_time << " seconds" << std::endl;
+    std::cout << "MOSP Computation Time : " << mosp_time << " seconds" << std::endl;
+    std::cout << "Total Execution Time: " << (graph_load_time + metis_time + sosp_time + mosp_time) << " seconds" << std::endl;
+
     std::cout << "\nMOSP Tree Edges:" << std::endl;
     for (size_t i = 0; i < mosp_edges.size(); ++i) {
         auto [u, v] = mosp_edges[i];
