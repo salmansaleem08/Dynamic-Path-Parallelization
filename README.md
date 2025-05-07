@@ -163,12 +163,12 @@ mpirun --hostfile hosts.txt -np 4 --mca plm_rsh_no_tree_spawn 1 ./parallel_mosp 
 
 **Compile**:
 ```bash
-g++ -o serial_mosp Parallel_Algorithm_Using_SerialApproach_Only.cpp -std=c++11
+g++ -o serial_mosp MOSP_Using_Serial_BigData.cpp -lmetis -I/usr/include -L/usr/lib
 ```
 
 **Run**:
 ```bash
-./serial_mosp
+./serial_mosp 2
 ```
 
 ---
